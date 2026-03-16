@@ -1,8 +1,10 @@
 use std::collections::HashSet;
 use std::ffi::OsStr;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
+use colored::Colorize;
 use walkdir::WalkDir;
 
 use crate::cli::Args;
@@ -82,6 +84,50 @@ pub fn build_plan(args: &Args) -> anyhow::Result<Vec<MoveAction>> {
     }
 
     Ok(actions)
+}
+
+pub fn execute_plan(plan: Vec<MoveAction>, dry_run: bool) -> anyhow::Result<()> {
+    for action in &plan {
+        if dry_run {
+            println!(
+                "{}",
+                format!(
+                    "[DRY RUN] Would move: {} -> {}",
+                    action.source.display(),
+                    action.destination.display()
+                )
+                .yellow()
+            );
+        } else {
+            let dest_parent = action
+                .destination
+                .parent()
+                .context("Destination has no parent directory")?;
+
+            fs::create_dir_all(dest_parent)
+                .with_context(|| format!("Failed to create directory {}", dest_parent.display()))?;
+
+            fs::rename(&action.source, &action.destination).with_context(|| {
+                format!(
+                    "Failed to move {} -> {}",
+                    action.source.display(),
+                    action.destination.display()
+                )
+            })?;
+
+            println!(
+                "{}",
+                format!(
+                    "Moved: {} -> {}",
+                    action.source.display(),
+                    action.destination.display()
+                )
+                .green()
+            );
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
