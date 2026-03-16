@@ -1,5 +1,6 @@
+use std::collections::HashSet;
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use walkdir::WalkDir;
@@ -20,6 +21,28 @@ fn extension_category(path: &Path) -> String {
         .unwrap_or_else(|| "misc".to_string())
 }
 
+fn resolve_collision(dest: &Path, claimed: &HashSet<PathBuf>) -> PathBuf {
+    if !dest.exists() && !claimed.contains(dest) {
+        return dest.to_path_buf();
+    }
+
+    let stem = dest.file_stem().unwrap_or_default().to_string_lossy();
+    let ext = dest
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let parent = dest.parent().unwrap_or_else(|| Path::new(""));
+
+    let mut counter = 1u32;
+    loop {
+        let candidate = parent.join(format!("{stem} ({counter}){ext}"));
+        if !candidate.exists() && !claimed.contains(&candidate) {
+            return candidate;
+        }
+        counter += 1;
+    }
+}
+
 pub fn build_plan(args: &Args) -> anyhow::Result<Vec<MoveAction>> {
     let target = &args.target_dir;
     let max_depth = if args.recursive { usize::MAX } else { 1 };
@@ -30,6 +53,7 @@ pub fn build_plan(args: &Args) -> anyhow::Result<Vec<MoveAction>> {
         .filter_entry(|e| e.depth() == 0 || !is_hidden(e.path()));
 
     let mut actions = Vec::new();
+    let mut claimed: HashSet<PathBuf> = HashSet::new();
 
     for entry in walker {
         let entry = entry.context("Failed to read directory entry")?;
@@ -41,14 +65,15 @@ pub fn build_plan(args: &Args) -> anyhow::Result<Vec<MoveAction>> {
 
         let category = extension_category(path);
 
-        let file_name = path.file_name().context("File entry has no file name")?;
-
-        let destination = target.join(&category).join(file_name);
-
         // Skip files already sitting in their correct category subfolder.
         if path.parent() == Some(target.join(&category).as_path()) {
             continue;
         }
+
+        let file_name = path.file_name().context("File entry has no file name")?;
+        let desired = target.join(&category).join(file_name);
+        let destination = resolve_collision(&desired, &claimed);
+        claimed.insert(destination.clone());
 
         actions.push(MoveAction {
             source: path.to_path_buf(),
@@ -189,6 +214,66 @@ mod tests {
             plan[0].source.file_name().unwrap().to_string_lossy(),
             "new.txt"
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_collision_on_disk() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let base = tmp.path();
+
+        // Pre-create the destination so it collides on disk.
+        let txt_dir = base.join("txt");
+        fs::create_dir(&txt_dir)?;
+        fs::write(txt_dir.join("report.txt"), "old")?;
+
+        fs::write(base.join("report.txt"), "new")?;
+
+        let args = make_args(base, false);
+        let plan = build_plan(&args)?;
+
+        assert_eq!(plan.len(), 1);
+        assert_eq!(
+            plan[0].destination.file_name().unwrap().to_string_lossy(),
+            "report (1).txt"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_collision_within_plan() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let base = tmp.path();
+
+        // Two files with the same name in different subdirectories,
+        // both destined for txt/.
+        let sub_a = base.join("a");
+        let sub_b = base.join("b");
+        fs::create_dir(&sub_a)?;
+        fs::create_dir(&sub_b)?;
+        fs::write(sub_a.join("notes.txt"), "a")?;
+        fs::write(sub_b.join("notes.txt"), "b")?;
+
+        let args = make_args(base, true);
+        let plan = build_plan(&args)?;
+
+        assert_eq!(plan.len(), 2);
+
+        let dest_names: Vec<String> = plan
+            .iter()
+            .map(|a| {
+                a.destination
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+
+        assert!(dest_names.contains(&"notes.txt".to_string()));
+        assert!(dest_names.contains(&"notes (1).txt".to_string()));
 
         Ok(())
     }
