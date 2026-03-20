@@ -35,10 +35,12 @@ downloads/
 
 ## Requirements
 
-- Rust
-- Cargo
+- Rust and Cargo for building from source
+- Node.js and npm for installing the packaged npm binary
 
 ## Installation
+
+### From Cargo
 
 Build and run locally:
 
@@ -56,6 +58,22 @@ Then run:
 
 ```bash
 file_organizer --help
+```
+
+### From npm
+
+This project is also packaged for npm as `@mahathi154/file_organizer`.
+
+Install it in an npm project:
+
+```bash
+npm install @mahathi154/file_organizer
+```
+
+Then run it with:
+
+```bash
+npx file_organizer --help
 ```
 
 ## Usage
