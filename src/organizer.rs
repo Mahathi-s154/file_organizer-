@@ -1,14 +1,15 @@
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use colored::Colorize;
 use walkdir::WalkDir;
 
-use crate::cli::Args;
-use crate::models::MoveAction;
+use crate::cli::{Args, OutputFormat};
+use crate::models::{ActionReport, ActionStatus, MoveAction, RunReport};
 
 fn is_hidden(path: &Path) -> bool {
     path.file_name()
@@ -80,24 +81,60 @@ pub fn build_plan(args: &Args) -> anyhow::Result<Vec<MoveAction>> {
         actions.push(MoveAction {
             source: path.to_path_buf(),
             destination,
+            category,
         });
     }
 
     Ok(actions)
 }
 
-pub fn execute_plan(plan: Vec<MoveAction>, dry_run: bool) -> anyhow::Result<()> {
-    for action in &plan {
-        if dry_run {
-            println!(
-                "{}",
+fn move_file(source: &Path, destination: &Path) -> anyhow::Result<ActionStatus> {
+    match fs::rename(source, destination) {
+        Ok(()) => Ok(ActionStatus::Moved),
+        Err(err) if err.kind() == ErrorKind::CrossesDevices => {
+            fs::copy(source, destination).with_context(|| {
                 format!(
-                    "[DRY RUN] Would move: {} -> {}",
-                    action.source.display(),
-                    action.destination.display()
+                    "Failed to copy {} -> {} after cross-filesystem rename failure",
+                    source.display(),
+                    destination.display()
                 )
-                .yellow()
-            );
+            })?;
+            fs::remove_file(source).with_context(|| {
+                format!(
+                    "Failed to remove {} after copy fallback to {}",
+                    source.display(),
+                    destination.display()
+                )
+            })?;
+            Ok(ActionStatus::CopiedAcrossFilesystems)
+        }
+        Err(err) => Err(err).with_context(|| {
+            format!(
+                "Failed to move {} -> {}",
+                source.display(),
+                destination.display()
+            )
+        }),
+    }
+}
+
+pub fn execute_plan(args: &Args, plan: Vec<MoveAction>) -> anyhow::Result<RunReport> {
+    let mut reports = Vec::with_capacity(plan.len());
+
+    for action in &plan {
+        let status = if args.dry_run {
+            if matches!(args.format, OutputFormat::Text) {
+                println!(
+                    "{}",
+                    format!(
+                        "[DRY RUN] Would move: {} -> {}",
+                        action.source.display(),
+                        action.destination.display()
+                    )
+                    .yellow()
+                );
+            }
+            ActionStatus::Planned
         } else {
             let dest_parent = action
                 .destination
@@ -107,27 +144,40 @@ pub fn execute_plan(plan: Vec<MoveAction>, dry_run: bool) -> anyhow::Result<()> 
             fs::create_dir_all(dest_parent)
                 .with_context(|| format!("Failed to create directory {}", dest_parent.display()))?;
 
-            fs::rename(&action.source, &action.destination).with_context(|| {
-                format!(
-                    "Failed to move {} -> {}",
-                    action.source.display(),
-                    action.destination.display()
-                )
-            })?;
+            let status = move_file(&action.source, &action.destination)?;
 
-            println!(
-                "{}",
-                format!(
-                    "Moved: {} -> {}",
-                    action.source.display(),
-                    action.destination.display()
-                )
-                .green()
-            );
-        }
+            if matches!(args.format, OutputFormat::Text) {
+                let message = match status {
+                    ActionStatus::Moved => format!(
+                        "Moved: {} -> {}",
+                        action.source.display(),
+                        action.destination.display()
+                    ),
+                    ActionStatus::CopiedAcrossFilesystems => format!(
+                        "Moved with copy fallback: {} -> {}",
+                        action.source.display(),
+                        action.destination.display()
+                    ),
+                    ActionStatus::Planned => {
+                        unreachable!("planned status is only used in dry runs")
+                    }
+                };
+
+                println!("{}", message.green());
+            }
+
+            status
+        };
+
+        reports.push(ActionReport::from_action(action, status));
     }
 
-    Ok(())
+    Ok(RunReport::new(
+        args.target_dir.clone(),
+        args.dry_run,
+        args.recursive,
+        reports,
+    ))
 }
 
 #[cfg(test)]
@@ -141,6 +191,7 @@ mod tests {
             target_dir: dir.to_path_buf(),
             dry_run: false,
             recursive,
+            format: OutputFormat::Text,
         }
     }
 

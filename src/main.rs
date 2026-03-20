@@ -5,36 +5,63 @@ mod organizer;
 use clap::Parser;
 use colored::Colorize;
 
-use cli::Args;
+use cli::{Args, OutputFormat};
+use models::RunReport;
 use organizer::{build_plan, execute_plan};
+
+fn emit_report(format: OutputFormat, report: &RunReport) -> anyhow::Result<()> {
+    match format {
+        OutputFormat::Text => {
+            if report.action_count == 0 {
+                println!(
+                    "{}",
+                    "Nothing to organize — all files are in place.".dimmed()
+                );
+                return Ok(());
+            }
+
+            println!("{}", "Done.".green().bold());
+
+            if report.summary.copied_across_filesystems > 0 {
+                println!(
+                    "{}",
+                    format!(
+                        "Used copy-and-delete fallback for {} file(s) moved across filesystems.",
+                        report.summary.copied_across_filesystems
+                    )
+                    .dimmed()
+                );
+            }
+
+            Ok(())
+        }
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(report)?);
+            Ok(())
+        }
+    }
+}
 
 fn run() -> anyhow::Result<()> {
     let args = Args::parse();
-
-    println!(
-        "{}",
-        format!("Organizing files in: {}", args.target_dir.display()).bold()
-    );
-
     let plan = build_plan(&args)?;
 
-    if plan.is_empty() {
+    if matches!(args.format, OutputFormat::Text) {
         println!(
             "{}",
-            "Nothing to organize — all files are in place.".dimmed()
+            format!("Organizing files in: {}", args.target_dir.display()).bold()
         );
-        return Ok(());
+
+        if !plan.is_empty() {
+            println!(
+                "{}",
+                format!("Found {} file(s) to organize.", plan.len()).cyan()
+            );
+        }
     }
 
-    println!(
-        "{}",
-        format!("Found {} file(s) to organize.", plan.len()).cyan()
-    );
-
-    execute_plan(plan, args.dry_run)?;
-
-    println!("{}", "Done.".green().bold());
-    Ok(())
+    let report = execute_plan(&args, plan)?;
+    emit_report(args.format, &report)
 }
 
 fn main() {
